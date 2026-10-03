@@ -54,7 +54,8 @@ func main() {
 	defer cluster.Close()
 
 	rec := lin.NewRecorder()
-	var acked, unknown, failedReads atomic.Int64
+	var acked, unknown, failedReads, slow atomic.Int64
+	var slowest atomic.Int64 // nanoseconds
 	stop := time.Now().Add(*duration)
 	log.Printf("running %d clients on %d keys for %s", *clients, *keys, *duration)
 
@@ -80,6 +81,16 @@ func main() {
 				out, err := run(octx, s, in)
 				ret := rec.Now()
 				cancel()
+				// Operations caught by a fault stall until the cluster recovers.
+				if took := ret - call; took > int64(time.Second) {
+					slow.Add(1)
+					for {
+						cur := slowest.Load()
+						if took <= cur || slowest.CompareAndSwap(cur, took) {
+							break
+						}
+					}
+				}
 				switch {
 				case err == nil:
 					rec.Record(c, in, out, call, ret)
@@ -97,6 +108,8 @@ func main() {
 	wg.Wait()
 	log.Printf("run finished: %d operations acknowledged, %d writes with unknown outcome, %d failed reads",
 		acked.Load(), unknown.Load(), failedReads.Load())
+	log.Printf("%d operations took longer than 1s; the slowest took %s",
+		slow.Load(), time.Duration(slowest.Load()).Round(time.Millisecond))
 
 	// Read every key once the faults are over, so the history ends with
 	// the state the cluster settled on. Every acknowledged write must be
