@@ -11,6 +11,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# kvcheck runs as a one-off container that Compose would otherwise warn about.
+export COMPOSE_IGNORE_ORPHANS=1
 compose=(docker compose -f deploy/docker-compose.yml)
 project=kvstore
 network="${project}_default"

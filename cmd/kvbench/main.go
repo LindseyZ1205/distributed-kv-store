@@ -1,8 +1,17 @@
-// Command kvbench is a closed-loop load generator. Each of -clients
-// goroutines has its own session and issues one operation at a time on
-// keys chosen uniformly at random, reading with probability -read-ratio
-// and writing otherwise. It reports throughput and latency percentiles for
-// the measurement window, which starts after -warmup.
+// Command kvbench is a load generator. Each of -clients goroutines has its
+// own session and issues one operation at a time on keys chosen uniformly
+// at random, reading with probability -read-ratio and writing otherwise.
+// It reports throughput and latency percentiles for the measurement
+// window, which starts after -warmup.
+//
+// Without -rate the clients run closed-loop, each sending its next request
+// as soon as the previous one returns, which measures the most the cluster
+// can sustain. With -rate the clients are paced to that many operations
+// per second in total, which measures latency at a given load. Paced
+// latency is measured from when an operation was scheduled to start, not
+// from when it actually started, so if the cluster falls behind the
+// backlog shows up in the numbers instead of silently lowering the load
+// (coordinated omission).
 package main
 
 import (
@@ -35,6 +44,7 @@ func main() {
 	valueSize := flag.Int("value-size", 100, "bytes per value")
 	readRatio := flag.Float64("read-ratio", 0.9, "fraction of operations that are reads")
 	opTimeout := flag.Duration("op-timeout", 5*time.Second, "per-operation timeout")
+	rate := flag.Float64("rate", 0, "total operations per second to pace the clients to; 0 runs closed-loop")
 	flag.Parse()
 	log.SetFlags(log.Ltime)
 
@@ -58,7 +68,13 @@ func main() {
 		log.Fatalf("preload: %v", err)
 	}
 
-	log.Printf("running %d clients, %.0f%% reads, %s warmup + %s", *clients, *readRatio*100, *warmup, *duration)
+	var interval time.Duration // between one client's operations when paced
+	pacing := "closed-loop"
+	if *rate > 0 {
+		interval = time.Duration(float64(*clients) / *rate * float64(time.Second))
+		pacing = fmt.Sprintf("paced to %.0f ops/s", *rate)
+	}
+	log.Printf("running %d clients, %.0f%% reads, %s, %s warmup + %s", *clients, *readRatio*100, pacing, *warmup, *duration)
 	start := time.Now()
 	measureFrom := start.Add(*warmup)
 	end := measureFrom.Add(*duration)
@@ -71,8 +87,19 @@ func main() {
 			s := cluster.NewSession()
 			rng := rand.New(rand.NewPCG(uint64(c), uint64(start.UnixNano())))
 			res := &results[c]
+			// Stagger paced clients across the first interval.
+			var next time.Time
+			if interval > 0 {
+				next = start.Add(time.Duration(rng.Int64N(int64(interval) + 1)))
+			}
 			for {
 				t0 := time.Now()
+				if interval > 0 {
+					if d := time.Until(next); d > 0 {
+						time.Sleep(d)
+					}
+					t0, next = next, next.Add(interval)
+				}
 				if !t0.Before(end) {
 					return
 				}
@@ -118,10 +145,10 @@ func main() {
 	log.Printf("write latency %s", describe(writes))
 
 	fmt.Println()
-	fmt.Println("| workload | clients | throughput | read p50 | read p99 | write p50 | write p99 | errors |")
-	fmt.Println("|---|---:|---:|---:|---:|---:|---:|---:|")
-	fmt.Printf("| %.0f%% reads, %d keys, %d B values | %d | %.0f ops/s | %s | %s | %s | %s | %d |\n",
-		*readRatio*100, *keys, *valueSize, *clients, total,
+	fmt.Println("| workload | clients | load | throughput | read p50 | read p99 | write p50 | write p99 | errors |")
+	fmt.Println("|---|---:|---|---:|---:|---:|---:|---:|---:|")
+	fmt.Printf("| %.0f%% reads, %d keys, %d B values | %d | %s | %.0f ops/s | %s | %s | %s | %s | %d |\n",
+		*readRatio*100, *keys, *valueSize, *clients, pacing, total,
 		ms(percentile(reads, 0.50)), ms(percentile(reads, 0.99)),
 		ms(percentile(writes, 0.50)), ms(percentile(writes, 0.99)), errs)
 }
