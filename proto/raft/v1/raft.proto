@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package raft.v1;
+
+option go_package = "github.com/LindseyZ1205/distributed-kv-store/gen/raftpb;raftpb";
+
+// Raft carries consensus traffic between the replicas of a shard group.
+// Every request names its group, so one connection between two nodes
+// serves all the groups they share.
+service Raft {
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+}
+
+message Entry {
+  int64 term = 1;
+  bytes data = 2;
+}
+
+message RequestVoteRequest {
+  int32 group = 1;
+  int64 term = 2;
+  int32 candidate_id = 3;
+  int64 last_log_index = 4;
+  int64 last_log_term = 5;
+}
+
+message RequestVoteResponse {
+  int64 term = 1;
+  bool vote_granted = 2;
+}
+
+message AppendEntriesRequest {
+  int32 group = 1;
+  int64 term = 2;
+  int32 leader_id = 3;
+  int64 prev_log_index = 4;
+  int64 prev_log_term = 5;
+  repeated Entry entries = 6;
+  int64 leader_commit = 7;
+}
+
+message AppendEntriesResponse {
+  int64 term = 1;
+  bool success = 2;
+  // Fast backup hints, set when success is false.
+  int64 x_term = 3;
+  int64 x_index = 4;
+  int64 x_len = 5;
+}
+
+message InstallSnapshotRequest {
+  int32 group = 1;
+  int64 term = 2;
+  int32 leader_id = 3;
+  int64 last_included_index = 4;
+  int64 last_included_term = 5;
+  bytes data = 6;
+}
+
+message InstallSnapshotResponse {
+  int64 term = 1;
+}

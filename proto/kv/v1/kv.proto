@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package kv.v1;
+
+option go_package = "github.com/LindseyZ1205/distributed-kv-store/gen/kvpb;kvpb";
+
+// KV is the client-facing API. Every node serves it for every shard, but
+// only the leader of a key's shard can complete a request for that key;
+// other nodes answer CODE_WRONG_LEADER with a hint.
+service KV {
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  // Topology describes the cluster, so clients can build the same hash
+  // ring as the servers and send each key straight to its shard.
+  rpc Topology(TopologyRequest) returns (TopologyResponse);
+
+  // Status reports this node's view of every shard, for operators and
+  // tests.
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+enum Code {
+  CODE_UNSPECIFIED = 0;
+  CODE_OK = 1;
+  // This node does not lead the key's shard. Retry at leader_hint if it
+  // is not -1, otherwise at another node.
+  CODE_WRONG_LEADER = 2;
+  // The request did not finish in time. For a write the outcome is
+  // unknown; retrying with the same client_id and seq is safe.
+  CODE_TIMEOUT = 3;
+}
+
+message GetRequest {
+  string key = 1;
+}
+
+message GetResponse {
+  Code code = 1;
+  int32 leader_hint = 2;
+  bool found = 3;
+  bytes value = 4;
+}
+
+// Writes carry a client id and a per-client sequence number. A client has
+// at most one write outstanding, and the server applies each (client_id,
+// seq) at most once, so retries after a timeout or a leader change are
+// safe.
+message PutRequest {
+  string key = 1;
+  bytes value = 2;
+  uint64 client_id = 3;
+  uint64 seq = 4;
+}
+
+message PutResponse {
+  Code code = 1;
+  int32 leader_hint = 2;
+}
+
+message DeleteRequest {
+  string key = 1;
+  uint64 client_id = 2;
+  uint64 seq = 3;
+}
+
+message DeleteResponse {
+  Code code = 1;
+  int32 leader_hint = 2;
+}
+
+message TopologyRequest {}
+
+message TopologyResponse {
+  // Address of node i at index i.
+  repeated string nodes = 1;
+  int32 shards = 2;
+  int32 vnodes = 3;
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  int32 node_id = 1;
+  repeated ShardStatus shards = 2;
+}
+
+message ShardStatus {
+  int32 shard = 1;
+  string role = 2;
+  int64 term = 3;
+  int32 leader = 4;
+  int64 commit_index = 5;
+  // Index the key-value state machine has applied.
+  int64 applied_index = 6;
+  int64 last_index = 7;
+  int64 snapshot_index = 8;
+  int64 keys = 9;
+  // Hash of the shard's data as of applied_index. Replicas that have
+  // applied the same index must report the same digest.
+  uint64 digest = 10;
+}
