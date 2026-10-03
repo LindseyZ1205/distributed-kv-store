@@ -16,18 +16,68 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write # to commit regenerated code on branch pushes
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup
+      - name: Commit regenerated code and module files
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A gen go.mod go.sum
+            git commit -m "Regenerate protobuf code and go.sum"
+            git push
+          fi
+      - name: Generated code is up to date
+        if: github.event_name != 'push' || github.ref == 'refs/heads/main'
+        run: |
+          git status --porcelain
+          test -z "$(git status --porcelain)"
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
-            echo "::error::gofmt needed on:"; echo "$unformatted"; gofmt -d .; exit 1
+            echo "::error::gofmt needed on: $unformatted"; gofmt -d .; exit 1
           fi
       - name: go vet
         run: go vet ./...
       - name: go test -race
         run: go test -race -count=1 -timeout 15m ./...
+
+  cluster:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Build image
+        run: make image
+      - name: Start three-node cluster
+        run: docker compose -f deploy/docker-compose.yml up -d --wait
+      - name: Load test, 90% reads
+        run: make bench | tee bench-read.txt
+      - name: Load test, 50% reads
+        run: |
+          docker compose -f deploy/docker-compose.yml run --rm --entrypoint /usr/local/bin/kvbench tools \
+            -addrs node1:7000,node2:7000,node3:7000 -read-ratio 0.5 | tee bench-mixed.txt
+      - name: Fault injection with linearizability check
+        run: make fault-test
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Load test"
+            echo
+            echo "500 closed-loop clients for 30s after a 5s warmup. Three nodes, six shards, and the load"
+            echo "generator all run on one GitHub-hosted runner ($(nproc) vCPUs, $(free -g | awk '/Mem:/{print $2}') GB)."
+            echo
+            grep -h '^|' bench-read.txt | head -2
+            grep -h '^| [0-9]' bench-read.txt bench-mixed.txt || true
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Node logs
+        if: failure()
+        run: docker compose -f deploy/docker-compose.yml logs --no-color --tail 300
